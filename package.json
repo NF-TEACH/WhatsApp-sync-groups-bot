@@ -1,0 +1,28 @@
+{
+  "name": "whatsapp-group-sync-bot",
+  "version": "1.0.0",
+  "description": "בוט לסנכרון קבוצות WhatsApp באמצעות Baileys",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "group",
+    "sync",
+    "bot"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.4.0",
+    "pino": "^8.15.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
