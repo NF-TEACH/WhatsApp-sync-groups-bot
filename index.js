@@ -1,8 +1,8 @@
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
-const fs = require('fs').promises; // שימוש ב-fs אסינכרוני
-const fsSync = require('fs'); // שימוש ב-fs סינכרוני לקריאת קונפיגורציה
+const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 const qrcode = require('qrcode-terminal');
 
@@ -18,9 +18,8 @@ try {
 
 const processedMessages = new Set();
 const messageMapping = new Map();
-const TEMP_DIR = './temp_media'; // תיקייה לקבצים זמניים
+const TEMP_DIR = './temp_media';
 
-// פונקציה לוודא שהתיקייה הזמנית קיימת
 async function ensureTempDirExists() {
     try {
         await fs.mkdir(TEMP_DIR, { recursive: true });
@@ -36,7 +35,6 @@ function getActualMessageContent(message) {
     return message;
 }
 
-// פונקציית הורדה ששומרת קובץ לדיסק ומחזירה את הנתיב
 async function downloadMediaToFile(messageId, mediaMessage, mediaType) {
     const stream = await downloadContentFromMessage(mediaMessage, mediaType);
     const fileExtension = mediaMessage.mimetype.split('/')[1].split(';')[0] || 'bin';
@@ -64,6 +62,46 @@ async function sendWithDelay(func) {
     console.log(`ממתין ${delay / 1000} שניות לפני השליחה הבאה...`);
     await new Promise(resolve => setTimeout(resolve, delay));
     return await func();
+}
+
+// --- פונקציות עזר חדשות וחכמות לזיהוי עריכה ---
+function searchForText(obj, depth = 0) {
+  if (!obj || depth > 6) return null;
+  if (typeof obj === 'string') {
+    if (obj.trim() !== '') return obj;
+    return null;
+  }
+  if (typeof obj !== 'object') return null;
+  
+  if (obj.conversation && typeof obj.conversation === 'string' && obj.conversation.trim() !== '') return obj.conversation;
+  if (obj.extendedTextMessage && obj.extendedTextMessage.text && typeof obj.extendedTextMessage.text === 'string' && obj.extendedTextMessage.text.trim() !== '') return obj.extendedTextMessage.text;
+  
+  for (const k of Object.keys(obj)) {
+    try {
+      const v = obj[k];
+      const res = searchForText(v, depth + 1);
+      if (res) return res;
+    } catch (_) {}
+  }
+  return null;
+}
+
+function extractEditedTextFromUpdate(update) {
+  try {
+    const u = update.update || update;
+    if (!u || !u.message) return null;
+
+    const protocolMsg = u.message.protocolMessage;
+    if (protocolMsg && protocolMsg.editedMessage) {
+      const edited = protocolMsg.editedMessage;
+      const text = edited.conversation || edited.extendedTextMessage?.text;
+      if (text) return text;
+    }
+    return searchForText(u.message);
+  } catch (e) {
+    console.error('❌ שגיאה בחילוץ טקסט ערוך:', e);
+    return null;
+  }
 }
 
 // --- פונקציות העתקה ---
@@ -94,26 +132,32 @@ async function copyMediaMessage(sock, targetGroupId, message, buffer, type) {
 // --- פונקציות מחיקה ועריכה ---
 async function deleteMessageInTargets(sock, originalMessageId) {
     const targetMessageIds = messageMapping.get(originalMessageId);
-    if (!targetMessageIds) return;
+    if (!targetMessageIds) {
+        console.log(`לא נמצא מיפוי למחיקת הודעה ${originalMessageId}`);
+        return;
+    }
     for (const [targetGroupId, messageId] of targetMessageIds.entries()) {
         try {
-            await sock.sendMessage(targetGroupId, { delete: { remoteJid: targetGroupId, id: messageId } });
-            console.log(`הודעה נמחקה בקבוצת יעד: ${targetGroupId}`);
+            await sock.sendMessage(targetGroupId, { delete: { remoteJid: targetGroupId, id: messageId, fromMe: true } });
+            console.log(`הודעה ${messageId} נמחקה בהצלחה בקבוצת יעד: ${targetGroupId}`);
         } catch (error) {
-            console.error(`שגיאה במחיקת הודעה בקבוצה ${targetGroupId}:`, error);
+            console.error(`שגיאה במחיקת הודעה ${messageId} בקבוצה ${targetGroupId}:`, error);
         }
     }
 }
 
 async function editMessageInTargets(sock, originalMessageId, newText) {
     const targetMessageIds = messageMapping.get(originalMessageId);
-    if (!targetMessageIds) return;
+    if (!targetMessageIds) {
+        console.log(`לא נמצא מיפוי לעריכת הודעה ${originalMessageId}`);
+        return;
+    }
     for (const [targetGroupId, messageId] of targetMessageIds.entries()) {
         try {
-            await sock.sendMessage(targetGroupId, { text: newText, edit: { remoteJid: targetGroupId, id: messageId } });
-            console.log(`הודעה נערכה בקבוצת יעד: ${targetGroupId}`);
+            await sock.sendMessage(targetGroupId, { text: newText, edit: { remoteJid: targetGroupId, id: messageId, fromMe: true } });
+            console.log(`הודעה ${messageId} נערכה בהצלחה בקבוצת יעד: ${targetGroupId}`);
         } catch (error) {
-            console.error(`שגיאה בעריכת הודעה בקבוצה ${targetGroupId}:`, error);
+            console.error(`שגיאה בעריכת הודעה ${messageId} בקבוצה ${targetGroupId}:`, error);
         }
     }
 }
@@ -226,7 +270,7 @@ async function copyMessageToTargets(sock, message) {
 
 // --- פונקציית הבוט הראשית ---
 async function startWhatsAppBot() {
-    await ensureTempDirExists(); // וידוא שהתיקייה קיימת לפני התחלה
+    await ensureTempDirExists();
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const sock = makeWASocket({
         auth: state,
@@ -261,24 +305,25 @@ async function startWhatsAppBot() {
         await copyMessageToTargets(sock, message);
     });
     
+    // --- מנגנון משופר ומתוקן לטיפול בעדכונים ---
     sock.ev.on('messages.update', async (updates) => {
         for (const update of updates) {
             if (update.key.remoteJid !== groupConfig.triggerGroupId) continue;
             
-            // טיפול במחיקת הודעה
-            const messageStubType = update.update?.messageStubType;
-            if (messageStubType === 1 || messageStubType === 68) { // REVOKE or PROTOCOL_DELETE
-                console.log('הודעה נמחקה בקבוצת המקור');
-                await deleteMessageInTargets(sock, update.key.id);
+            // 1. טיפול בעריכת הודעה
+            const editedText = extractEditedTextFromUpdate(update);
+            if (editedText) {
+                console.log(`זוהתה עריכת הודעה (${update.key.id}) בקבוצת המקור. טקסט חדש: "${editedText}"`);
+                await editMessageInTargets(sock, update.key.id, editedText);
+                continue; // עברנו לעדכון הבא
             }
-            
-            // טיפול בעריכת הודעה
-            if (update.update?.editedMessage) {
-                console.log('הודעה נערכה בקבוצת המקור');
-                const newText = update.update.editedMessage.conversation || update.update.editedMessage.extendedTextMessage?.text || '';
-                if (newText) {
-                    await editMessageInTargets(sock, update.key.id, newText);
-                }
+
+            // 2. טיפול במחיקת הודעה (בדיקה מקיפה יותר)
+            const messageStubType = update.update?.messageStubType;
+            if (update.update?.message === null || messageStubType === 1 /* REVOKE */ || messageStubType === 68 /* PROTOCOL_DELETE */) {
+                console.log(`זוהתה מחיקת הודעה (${update.key.id}) בקבוצת המקור.`);
+                await deleteMessageInTargets(sock, update.key.id);
+                continue;
             }
         }
     });
@@ -291,7 +336,9 @@ startWhatsAppBot().catch(console.error);
 
 process.on('SIGINT', () => {
     console.log('סוגר את הבוט...');
-    fsSync.rmSync(TEMP_DIR, { recursive: true, force: true }); // ניקוי קבצים זמניים ביציאה
+    if (fsSync.existsSync(TEMP_DIR)) {
+        fsSync.rmSync(TEMP_DIR, { recursive: true, force: true });
+    }
     process.exit(0);
 });
 
